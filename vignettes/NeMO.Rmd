@@ -1,0 +1,721 @@
+---
+title: "Introduction to NeMO"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to NeMO}
+  % \VignetteDepends{ggridges, gridExtra, RColorBrewer}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = '#>'
+)
+```
+
+```{=html}
+<style>
+body {
+  text-align: justify;
+  max-width: 900px;
+  margin: auto;
+}
+
+table {
+  vertical-align: middle;
+}
+</style>
+```
+
+## Introduction
+
+The **`NeMO`** package (Nested eDNA Metabarcoding Occupancy) provides a flexible Bayesian framework to model **multi-species site occupancy** using **environmental DNA (eDNA) metabarcoding data**. It is specifically designed to account for **imperfect detection**, accommodate various **experimental designs**, and support analysis using either **presence/absence** or **sequence read count** data.
+
+This vignette walks through a basic example to illustrate:
+
+1.  [How to prepare input data](#step1)
+
+2.  [How to fit an occupancy model](#step2)
+
+3.  [How to interpret the outputs](#step3)
+
+For further details, see this [**preprint**](https://doi.org/10.1101/2025.05.23.655794) and the [**reference manual**](https://github.com/bastien-mace/NeMO/blob/main/docs/NeMO_1.0.0.pdf).
+
+------------------------------------------------------------------------
+
+```{r, fig.align='center', echo=FALSE, out.width='100%', fig.cap="Overview of the Package"}
+knitr::include_graphics(system.file('figures/overview.png', package = 'NeMO'))
+```
+
+## 1. Preparing the Inputs <a name="step1"></a>
+
+eDNA metabarcoding typically targets $N$ **species** (or OTUs, ASVs, *etc*.) across different **sites** $(I)$. For each site, multiple **eDNA samples** $(J)$ are collected, and each sample undergoes multiple **PCR replicates** $(K)$. This sampling can be repeated over multiple **campaigns** $(C)$.
+
+------------------------------------------------------------------------
+
+```{r, fig.align='center', echo=FALSE, out.width='100%', fig.cap="eDNA Study Design"}
+knitr::include_graphics(system.file('figures/study_design.png', package = 'NeMO'))
+```
+
+------------------------------------------------------------------------
+
+Before running a model with **`NeMO`** on an eDNA metabarcoding dataset, we need to load the package and prepare the input data. We'll also use the [**`tidyverse`**](https://www.tidyverse.org/) for convenient data manipulation and visualization.
+
+```{r, message=FALSE, warning=FALSE}
+library(NeMO)
+library(tidyverse)
+```
+
+In this example, we'll use the `PCR_rep_seq_read` modeling protocol, *i.e.* the most detailed model handled by **`NeMO`**. It uses **raw sequence read counts from individual PCR replicates**, fully nested within samples and sites, for all species detected and across all campaigns.
+
+Here is a summary of the modeling protocols supported by **`NeMO`**:
+
++--------------------+--------------------------+--------------------------------+
+| Protocol           | Input data               | PCR replication stage          |
++====================+==========================+================================+
+| `PCR_rep`          | Presence/Absence → $1/0$ | Yes                            |
++--------------------+--------------------------+--------------------------------+
+| `seq_read`         | Sequence read count      | No → PCR replicates are pooled |
++--------------------+--------------------------+--------------------------------+
+| `PCR_rep_seq_read` | Sequence read count      | Yes                            |
++--------------------+--------------------------+--------------------------------+
+
+### 1.1. Input Array
+
+Let's load the example dataset `fish_PCR_rep_seq_read` included in the package:
+
+```{r}
+data('fish_PCR_rep_seq_read')
+str(fish_PCR_rep_seq_read)
+```
+
+This is a **5-dimensional array** with dimensions:
+
+-   $N$: Species $(10)$
+-   $I$: Sites $(10)$
+-   $J$: eDNA samples $(2)$
+-   $K$: PCR replicates $(5)$
+-   $C$: Campaigns $(1)$
+
+The array has dimensions $10 \times 10 \times 2 \times 5 \times 1$. Each entry gives the number of sequencing reads for a specific combination of these factors.
+
+***NOTE:*** Missing values (`NA`) are allowed in the input array. For example, this may occur when some samples have fewer PCR replicates than others.
+
+***NOTE:*** Each dimension should have a name:
+
+```{r}
+dimnames(fish_PCR_rep_seq_read)
+```
+
+***NOTE:*** If using a different protocol, the input format differs slightly:
+
+-   `PCR_rep`: Same structure, but entries are either $1$ or $0$ (presence/absence)
+-   `seq_read`: Sequence reads are pooled across replicates → 4D array $(N \times I \times J \times C)$
+
+### 1.2. Covariate Data
+
+We now load an environmental covariate dataset (`distance_cov`):
+
+```{r load-covariate}
+data('distance_cov')
+head(distance_cov)
+```
+
+This dataset includes the **standardized distance to sea** for each site.
+
+The `covarray()` function facilitates the integration of covariates into the **`NeMO`** modeling framework. It prepares them as arrays compatible with the `Nemodel()` function. Each covariate should be given as a **named sublist** with three required fields:
+
++-------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Field       | Description                                                                                                                                                                                                                 |
++=============+=============================================================================================================================================================================================================================+
+| `cov_data`  | A vector, matrix, or array of covariate values. Use **standardized** values for quantitative variables, or **binary** indicators $(0/1)$ for categorical variables.                                                         |
+|             |                                                                                                                                                                                                                             |
+|             | ***NOTE:*** For a categorical variable with $\nu$ categories, provide $\nu - 1$ binary indicator sublists, each filled with $1$ where the category is present. The omitted category will be treated as the reference level. |
+|             |                                                                                                                                                                                                                             |
+|             | ***NOTE:*** The model **does not handle missing values** (`NA`) in covariates. Make sure your covariate data is **complete**.                                                                                               |
++-------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| `level`     | The level where we want to **test the effect** of the covariate: `psi` (occupancy), `theta` (eDNA collection), `p` (PCR detection), or `phi` (sequence read count).                                                         |
++-------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| `dimension` | The dimension(s) along which the covariate varies:                                                                                                                                                                          |
+|             |                                                                                                                                                                                                                             |
+|             | \- **Single dimensions:** `species`, `site`, `sample`, `replicate`, or `campaign` → Provide **a vector**                                                                                                                    |
+|             |                                                                                                                                                                                                                             |
+|             | \- **Combined dimensions:** Combine terms with underscores (*e.g.*, `site_sample_replicate`) → Provide **an array or matrix**, where dimension order must follow: `site` → `sample` → `replicate` → `campaign`              |
+|             |                                                                                                                                                                                                                             |
+|             | ***NOTE:*** `species` cannot be combined and must be treated separately.                                                                                                                                                    |
++-------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+Here, the distance covariate varies **by site**, and we want test its influence on **occupancy probability** $\psi$, so we provide the corresponding **vector** `cov_data = distance_cov$Distance` and specify `level = 'psi'` and `dimension = 'site'`.
+
+```{r}
+covariates <- covarray(
+  protocol = 'PCR_rep_seq_read',
+  array = fish_PCR_rep_seq_read,
+  cov_list = list(
+    Distance = list(
+      cov_data = distance_cov$Distance,
+      level = 'psi',
+      dimension = 'site'
+    )
+  )
+)
+```
+
+Even though the covariate varies along a single dimension, `covarray()` automatically expands it to match the full structure of the input array for the specified protocol.
+
+## 2. Fit Occupancy Model <a name="step2"></a>
+
+The core of **`NeMO`** is the `Nemodel()` function, which fits a **Bayesian multi-scale, multi-species occupancy model** suited to eDNA metabarcoding data. It explicitly models **imperfect detection** at each level and estimates key probabilities while allowing covariate effects.
+
+### 2.1. Model Structure
+
+The model operates across four nested stages. Each stage involves a latent variable and an associated probability or expected count:
+
++-----------------------+-----------------+-----------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| Stage                 | Latent variable | Parameter       | Description                                                                                                                                         |
++=======================+=================+=================+=====================================================================================================================================================+
+| **Occupancy**         | $Z_{nic}$       | $\psi_{nic}$    | Is species $n$ present at site $i$ during campaign $c$?                                                                                             |
++-----------------------+-----------------+-----------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| **eDNA collection**   | $A_{nijc}$      | $\theta_{nijc}$ | Species $n$ **is present** at site $i$ during campaign $c$                                                                                          |
+|                       |                 |                 |                                                                                                                                                     |
+|                       |                 |                 | → Was its eDNA collected in sample $j$?                                                                                                             |
++-----------------------+-----------------+-----------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| **PCR amplification** | $W_{nijkc}$     | $p_{nijkc}$     | Species $n$ **is present** at site $i$ during campaign $c$, and its eDNA **was collected** in sample $j$                                            |
+|                       |                 |                 |                                                                                                                                                     |
+|                       |                 |                 | → Was its eDNA amplified in PCR replicate $k$?                                                                                                      |
++-----------------------+-----------------+-----------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| **Sequencing**        | $Y_{nijkc}$     | $\phi_{nijkc}$  | Species $n$ **is present** at site $i$ during campaign $c$, and its eDNA **was collected** in sample $j$ and **was amplified** in PCR replicate $k$ |
+|                       |                 |                 |                                                                                                                                                     |
+|                       |                 |                 | → How many sequence reads are generated after sequencing?                                                                                           |
++-----------------------+-----------------+-----------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+
+The observed data consists of read counts $(Y_{nijkc})$, and the model estimates the underlying latent states and parameters.
+
+***NOTE:*** This model structure applies to the `PCR_rep_seq_read` modeling protocol:
+
+-   With `seq_read`, the PCR amplification stage $(W_{nijkc})$ is omitted. Read counts are modeled directly after eDNA collection: $(Y_{nijc})$.
+-   With `PCR_rep`, the sequencing stage $(Y_{nijkc})$ is not modeled. Observations are binary $(W_{nijkc})$.
+
+------------------------------------------------------------------------
+
+```{r, fig.align='center', echo=FALSE, out.width='100%', fig.cap="Probability Tree of the Modeling Framework"}
+knitr::include_graphics(system.file('figures/probability_tree.png', package = 'NeMO'))
+```
+
+### 2.2. Fitting the Model with `Nemodel()`
+
+Now we run the model using the prepared input array and covariates. The modeling is fully **Bayesian**, and inference is performed using Markov Chain Monte Carlo (MCMC) sampling, allowing for robust estimation of posterior distributions and uncertainty quantification for all model parameters.
+
+```{r}
+fit <- Nemodel(
+  array = fish_PCR_rep_seq_read,
+  covariates = covariates,
+  protocol = 'PCR_rep_seq_read',
+  nb_iterations = 1000,
+  nb_burnin = 500,
+  nb_thinning = 1,
+  nb_chains = 3,
+  latent = c('Z'), # we record the Z latent array
+  loglik = T # we record log-likelihoods for further model comparison
+)
+```
+
+***NOTE:*** In practice, increase `nb_iterations`, and adjust `nb_burnin`, and `nb_thinning` for robust convergence. You can set `parallel = TRUE` to accelerate the process.
+
+### 2.3. MCMC Diagnostics
+
+After model fitting, you should assess **MCMC convergence** and **sampling efficiency** of the parameters' estimates. The `Nemodel()` function returns a JAGS model object compatible with standard diagnostic tools from the [**`R2jags`**](https://github.com/suyusung/R2jags) package.
+
+We start with a visual inspection of convergence:
+
+```{r, fig.align='center', fig.width=8, fig.height=7}
+plot(fit@model)
+```
+
+We then examine the Gelman–Rubin diagnostic $(\hat{R})$, which should be close to $1$ for all parameters. Here, we exclude latent variables $(Z)$ and log-likelihoods from the summary:
+
+```{r, fig.align='center'}
+Rhat <- fit@model$BUGSoutput$summary[, 'Rhat']
+
+rows_to_keep <- !grepl("^log_lik", names(Rhat)) & !grepl("^Z", names(Rhat))
+filtered_Rhat <- Rhat[rows_to_keep]
+
+hist(filtered_Rhat, main = "R-hat Distribution", xlab = "R-hat")
+sum(filtered_Rhat > 1.1) # number of parameters that poorly converged
+```
+
+***NOTE:*** Values $\hat{R} > 1.1$ may indicate poor convergence.
+
+We also check the **effective sample size** (`n_eff`), which should be sufficiently large for reliable posterior inference:
+
+```{r, fig.align='center'}
+n_eff <- fit@model$BUGSoutput$summary[, 'n.eff']
+
+rows_to_keep <- !grepl("^log_lik", names(n_eff)) & !grepl("^Z", names(n_eff))
+filtered_n_eff <- n_eff[rows_to_keep]
+
+hist(filtered_n_eff, main = "Effective Sample Size", xlab = "n_eff")
+sum(filtered_n_eff < 100) # number of parameters with low effective sample size
+```
+
+***NOTE:*** Parameters with `n_eff` $< 100$ may indicate autocorrelation between iterations.
+
+Although the model runs successfully, some parameters show relatively low effective sample sizes and $\hat{R}$ values slightly above $1.1$. In a real analysis, we would **increase the number of iterations** to ensure more reliable **convergence**, and potentially **increase the thinning interval** to reduce autocorrelation.
+
+## 3. Interpret the Outputs <a name="step3"></a>
+
+After fitting the model, we can extract key outputs to interpret the ecological patterns, assess model performance, and guide future data collection strategies.
+
+### 3.1. Parameter Estimates
+
+#### Occupancy Probabilities
+
+The latent occupancy state $Z_{nic}$ indicates whether species $n$ is present at site $i$ during campaign $c$. In this example, since we have only one sampling campaign, the array $Z$ reduces to a matrix of dimensions $N × I$. By averaging across MCMC samples, we obtain the **posterior probability of occupancy** for each species at each site.
+
+```{r, fig.align='center', fig.width=7, fig.height=5}
+N <- dim(fish_PCR_rep_seq_read)[1] # number of species
+I <- dim(fish_PCR_rep_seq_read)[2] # number of sites
+species_names <- rownames(fish_PCR_rep_seq_read) # names of species
+
+# We build the data frame to record mean posterior occupancy per species per site
+Z_tab <- data.frame(Species = rep(species_names, each = I), # species names
+                    Site = rep(colnames(fish_PCR_rep_seq_read), N), # sites names
+                    Post_Z = rep(NA, N * I)) # empty vector for mean posterior Z values
+
+# We fill the data frame using the model output
+count <- 1
+for (n in 1:N){
+  for (i in 1:I){
+    Z_tab$Post_Z[count] <- mean(fit@model$BUGSoutput$sims.matrix[, paste0("Z[", n, ",", i, ",1]")])
+    count <- count + 1
+  }
+}
+
+# We plot the figure
+Z_plot <- ggplot(Z_tab,
+                 aes(x = Species,
+                     y = Site,
+                     fill = Post_Z)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = RColorBrewer::brewer.pal(8, "YlOrRd")) +
+  theme_classic() +
+  labs(fill = "Mean posterior occupancy") +
+  guides(
+    fill = guide_colorbar(
+      title.position = "top", 
+      barwidth = 10, 
+      barheight = 0.5, 
+      frame.colour = "black", 
+      ticks.colour = "black")) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(color = "black", face = "bold", size = 15),
+    axis.text.x = element_text(color = "black", angle = 30, size = 10, face = "bold.italic", hjust = 1),
+    axis.text.y = element_blank(),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.title = element_text(size = 15, face = "bold", hjust = 0.5),
+    legend.text = element_text(face = "bold"),
+    legend.position = "top",
+    legend.box = "horizontal")
+Z_plot
+```
+
+This heatmap displays the **mean occupancy** $Z_{ni}$ for each species–site combination. Warmer colors indicate higher probabilities of true presence. Species with broader distributions or strong site-level associations appear with consistently higher occupancy across sites. This visualization helps identify spatial patterns in community composition.
+
+***NOTE:*** Results may not reflect true ecological patterns here, as this is an example dataset with insufficient MCMC samples to fully capture the model's uncertainty.
+
+#### Effect of Covariates
+
+We can visualize the influence of the covariate **'Distance to sea'** on the occupancy probability $(\psi)$ across all species. This helps assess how spatial factors shape community distribution.
+
+```{r, warning=FALSE, fig.align='center', fig.width=7, fig.height=5}
+N <- dim(fish_PCR_rep_seq_read)[1] # number of species
+species_names <- rownames(fish_PCR_rep_seq_read) # names of species
+
+# We build the data frame to record median and HDI of the covariate estimate for each species
+beta_tab <- data.frame(Species = species_names, # species names
+                       Median = rep(NA, N), # empty vector for median beta values
+                       Bottom = rep(NA, N), # empty vector for bottom HDI values
+                       Top = rep(NA, N)) # empty vector for top HDI values
+
+# We fill the data frame using the model output
+for (n in 1:N){
+  beta_tab$Median[n] <- median(fit@model$BUGSoutput$sims.matrix[, paste0("beta_psi[", n,",1]")])
+  beta_tab$Bottom[n] <- hdi(fit@model$BUGSoutput$sims.matrix[, paste0("beta_psi[", n,",1]")])[1]
+  beta_tab$Top[n] <- hdi(fit@model$BUGSoutput$sims.matrix[, paste0("beta_psi[", n,",1]")])[2]
+}
+
+# We check if HDIs overlap 0
+beta_tab <- mutate(beta_tab,
+                   signif = Bottom * Top > 0, # TRUE if HDI not overlaps 0
+                   Species = fct_reorder(Species, Median, .desc = TRUE))
+
+# Species names will be displayed when HDI not overlaps 0
+color_text <- arrange(beta_tab,
+                      desc(beta_tab$Median)) %>%
+  mutate(color = ifelse(signif, "black", "grey")) %>%
+  select(color)
+
+# We plot the figure
+distance_plot <- ggplot(beta_tab, aes(y = Median,
+                                      x = Species,
+                                      color = signif)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Bottom, ymax = Top), width = 0) +
+  scale_color_manual(values = c("grey", "black"))  +
+  geom_hline(yintercept = 0) +
+  ylab("Distance to sea\n(Parameter estimate)") +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(color = "black", face = "bold", size = 15),
+    axis.text.x = element_text(angle = 30, size = 10, face = "bold.italic", hjust = 1, color = color_text$color),
+    axis.text.y = element_text(face = "bold", size = 10))
+distance_plot
+```
+
+This plot shows the estimated effect of the site-level covariate **'Distance to sea'** on occupancy probability $(\psi)$ for each species. Points represent the posterior medians of the $\beta_{\psi_{n}}$ coefficients, while vertical lines indicate the 95% highest density intervals (HDIs). A horizontal reference line is drawn at zero. Species are ordered by the median effect size. The color of points and labels distinguishes whether the HDI excludes zero (black) or overlaps zero (grey), providing a visual summary of the strength and direction of estimated covariate effects.
+
+***NOTE:*** Results may not reflect true ecological patterns here, as this is an example dataset with insufficient MCMC samples to fully capture the model's uncertainty.
+
+#### Posterior Distributions of Key Parameters
+
+To understand parameter uncertainty, we can plot the posterior densities for:
+
+-   $\psi$: Occupancy probability
+
+-   $\theta$: Probability of eDNA collection
+
+-   $p$: Probability of PCR detection
+
+-   $\phi$: Expected sequence read count
+
+```{r, message = FALSE, fig.align='center', fig.width=8, fig.height=14}
+N <- dim(fish_PCR_rep_seq_read)[1] # number of species
+I <- dim(fish_PCR_rep_seq_read)[2] # number of sites
+sims <- fit@model$BUGSoutput$n.sims # number of simulations
+species_names <- rownames(fish_PCR_rep_seq_read) # names of species
+
+# ψ RIDGE LINE PLOT
+# We extract parameter intercept
+alpha_psi_start <- which(colnames(fit@model$BUGSoutput$sims.matrix) == "alpha_psi[1]")
+alpha_psi_stop <- which(colnames(fit@model$BUGSoutput$sims.matrix) == paste0("alpha_psi[", N, "]"))
+alpha_posterior_psi <- fit@model$BUGSoutput$sims.matrix[, alpha_psi_start:alpha_psi_stop]
+
+# We extract parameter slope term (associated to covariate)
+beta_psi_start <- which(colnames(fit@model$BUGSoutput$sims.matrix) == "beta_psi[1,1]")
+beta_psi_stop <- which(colnames(fit@model$BUGSoutput$sims.matrix) == paste0("beta_psi[", N, ",1]"))
+beta_posterior_psi <- fit@model$BUGSoutput$sims.matrix[, beta_psi_start:beta_psi_stop]
+
+# We build the data frame to record occupancy probability for each species
+psi_tab <- data.frame(Species = rep(species_names, each = I * sims),
+                      Post_psi = rep(NA, N * I * sims))
+
+# We fill the data frame using the model output
+count <- 1
+for (n in 1:N){
+  for (i in 1:I){
+    psi_tab$Post_psi[count:(count+sims-1)] <- plogis(alpha_posterior_psi[, n] + beta_posterior_psi[, n] * distance_cov$Distance[i])
+    count <- count + sims
+  }
+}
+
+# We plot the figure
+fig_psi <- ggplot(psi_tab,
+                  aes(x = Post_psi,
+                      y = Species)) +
+  ggridges::geom_density_ridges(fill = "lavenderblush3") +
+  theme_classic() +
+  xlab('Occupancy posterior probability (ψ)') +
+  theme(axis.text.x = element_text(face = "bold", size = 10),
+        axis.text.y = element_text(color = "black", face = "bold.italic", size = 10),
+        axis.title.x = element_text(color = "black", face = "bold", size = 15),
+        axis.title.y = element_blank())
+
+# θ RIDGE LINE PLOT
+# We extract parameter intercept
+alpha_theta_start <- which(colnames(fit@model$BUGSoutput$sims.matrix) == "alpha_theta[1]")
+alpha_theta_stop <- which(colnames(fit@model$BUGSoutput$sims.matrix) == paste0("alpha_theta[", N, "]"))
+alpha_posterior_theta <- fit@model$BUGSoutput$sims.matrix[, alpha_theta_start:alpha_theta_stop]
+
+# We build the data frame to record collection probability for each species
+theta_tab <- data.frame(Species = rep(species_names, each = sims),
+                        Post_theta = rep(NA, N * sims))
+
+# We fill the data frame using the model output
+count <- 1
+for (n in 1:N){
+  theta_tab$Post_theta[count:(count+sims-1)] <- plogis(alpha_posterior_theta[, n])
+  count <- count + sims
+}
+
+# We plot the figure
+fig_theta <- ggplot(theta_tab,
+                  aes(x = Post_theta,
+                      y = Species)) +
+  ggridges::geom_density_ridges(fill = "lavenderblush3") +
+  theme_classic() +
+  xlab('Collection posterior probability (θ)') +
+  theme(axis.text.x = element_text(face = "bold", size = 10),
+        axis.text.y = element_text(color = "black", face = "bold.italic", size = 10),
+        axis.title.x = element_text(color = "black", face = "bold", size = 15),
+        axis.title.y = element_blank())
+
+# p RIDGE LINE PLOT
+# We extract parameter intercept
+alpha_p_start <- which(colnames(fit@model$BUGSoutput$sims.matrix) == "alpha_p[1]")
+alpha_p_stop <- which(colnames(fit@model$BUGSoutput$sims.matrix) == paste0("alpha_p[", N, "]"))
+alpha_posterior_p <- fit@model$BUGSoutput$sims.matrix[, alpha_p_start:alpha_p_stop]
+
+# We build the data frame to record amplification probability for each species
+p_tab <- data.frame(Species = rep(species_names, each = sims),
+                    Post_p = rep(NA, N * sims))
+
+# We fill the data frame using the model output
+count <- 1
+for (n in 1:N){
+  p_tab$Post_p[count:(count+sims-1)] <- plogis(alpha_posterior_p[, n])
+  count <- count + sims
+}
+
+# We plot the figure
+fig_p <- ggplot(p_tab,
+                  aes(x = Post_p,
+                      y = Species)) +
+  ggridges::geom_density_ridges(fill = "lavenderblush3") +
+  theme_classic() +
+  xlab('Amplification posterior probability (p)') +
+  theme(axis.text.x = element_text(face = "bold", size = 10),
+        axis.text.y = element_text(color = "black", face = "bold.italic", size = 10),
+        axis.title.x = element_text(color = "black", face = "bold", size = 15),
+        axis.title.y = element_blank())
+
+# φ RIDGE LINE PLOT
+# We extract parameter intercept
+alpha_phi_start <- which(colnames(fit@model$BUGSoutput$sims.matrix) == "alpha_phi[1]")
+alpha_phi_stop <- which(colnames(fit@model$BUGSoutput$sims.matrix) == paste0("alpha_phi[", N, "]"))
+alpha_posterior_phi <- fit@model$BUGSoutput$sims.matrix[, alpha_phi_start:alpha_phi_stop]
+
+# We build the data frame to record expected sequence read count for each species
+phi_tab <- data.frame(Species = rep(species_names, each = sims),
+                      Post_phi = rep(NA, N * sims))
+
+# We fill the data frame using the model output
+count <- 1
+for (n in 1:N){
+  phi_tab$Post_phi[count:(count+sims-1)] <- exp(alpha_posterior_phi[, n])
+  count <- count + sims
+}
+
+# We plot the figure
+fig_phi <- ggplot(phi_tab,
+                  aes(x = Post_phi,
+                      y = Species)) +
+  ggridges::geom_density_ridges(fill = "lavenderblush3") +
+  theme_classic() +
+  xlab('Expected sequence read count (φ)') +
+  theme(axis.text.x = element_text(face = "bold", size = 10),
+        axis.text.y = element_text(color = "black", face = "bold.italic", size = 10),
+        axis.title.x = element_text(color = "black", face = "bold", size = 15),
+        axis.title.y = element_blank())
+
+gridExtra::grid.arrange(fig_psi, fig_theta, fig_p, fig_phi, nrow = 4, ncol = 1)
+```
+
+These ridge plots display the posterior distributions of four key model parameters estimated for each species. The first plot shows the **occupancy probability** $(\psi)$, which represents the probability that a species is present at a given site, integrating over the spatial covariate **'Distance to sea'**. The second plot shows the **collection probability** $(\theta)$, reflecting the likelihood that environmental DNA from a species is captured in an eDNA sample, conditional on its presence. The third plot presents the **amplification probability** $(p)$, which corresponds to the probability that collected eDNA from a species is successfully amplified during the PCR process. The final plot shows the **expected sequence read count** $(\phi)$, representing the expected number of sequencing reads assigned to a species across PCR replicates, conditional on successful amplification. These visualizations summarize the range and uncertainty of each parameter across species and help identify taxa that are more or less likely to be detected throughout the workflow.
+
+***NOTE:*** Results may not reflect true ecological patterns here, as this is an example dataset with insufficient MCMC samples to fully capture the model's uncertainty.
+
+### 3.2. Model Comparison
+
+To evaluate and compare model performance, we use the **Watanabe-Akaike Information Criterion (WAIC)**, a Bayesian alternative to traditional information criteria like AIC. WAIC estimates the model’s **out-of-sample predictive accuracy**, balancing goodness-of-fit and model complexity. A **lower WAIC value indicates a model with better expected predictive performance** while accounting for model complexity.
+
+```{r}
+waic <- WAIC(
+  model = fit
+  )
+print(waic)
+```
+
+To assess the contribution of the covariate **'Distance to sea'** to species occupancy, we compare this model to a **null model** that does not include any environmental covariates. The null model retains the same detection and sequencing structure but assumes that occupancy probabilities are constant across sites.
+
+```{r}
+fit_null <- Nemodel(
+  array = fish_PCR_rep_seq_read,
+  protocol = 'PCR_rep_seq_read',
+  nb_iterations = 1000,
+  nb_burnin = 500,
+  nb_thinning = 1,
+  nb_chains = 3,
+  loglik = TRUE
+)
+
+waic_null <- WAIC(model = fit_null)
+print(waic_null)
+```
+
+We calculate the difference in WAIC between the null and covariate-including models:
+
+```{r}
+delta_waic <- waic_null@waic - waic@waic
+cat("ΔWAIC =", delta_waic)
+```
+
+A **positive ΔWAIC value** indicates that the model including **'Distance to sea'** as a covariate provides better predictive performance.
+
+***NOTE:*** Results may not reflect true ecological patterns here, as this is an example dataset with insufficient MCMC samples to fully capture the model's uncertainty.
+
+### 3.3. Resource OptimIzation
+
+We use the `min_resources()` function to estimate the **minimal sampling effort** required to confidently confirm **species presence** with a **95% confidence**.
+
+```{r}
+resources <- min_resources(
+  model = fit,
+  resources = c("J",
+                "K",
+                "M")
+  )
+```
+
+The output suggests the required number of:
+
+-   eDNA samples $(J_{min})$
+
+-   PCR replicates $(K_{min})$
+
+-   Sequencing depth $(M_{min})$
+
+```{r, fig.align='center', fig.width=8, fig.height=9}
+species_names <- rownames(fish_PCR_rep_seq_read) # names of species
+
+# J_min (= Minimum number of eDNA samples)
+# We build the data frame to record median and HDI of J_min for each species
+J_min_tab <- data.frame(Species = species_names, # names of species
+                        Median = resources@J_min$median[, 1, 1, 1], # median J_min values (no variation among sites, samples, and campaigns)
+                        Bottom = resources@J_min$hdi1[, 1, 1, 1], # bottom HDI values
+                        Top = resources@J_min$hdi2[, 1, 1, 1]) # top HDI values
+
+# We plot the figure
+J_min_plot <- ggplot(J_min_tab, aes(y = 1,
+                                    x = Species,
+                                    fill = Median)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = RColorBrewer::brewer.pal(4, "Blues")) +
+  geom_text(aes(label = paste0(Median, "\n[", Bottom, "; ", Top, "]")),
+            fontface = "bold",
+            size = 3,
+            lineheight = 0.75) +
+  theme_classic() +
+  labs(fill = expression("Minimum number of eDNA samples (" * J[min] * ")")) +
+  guides(
+    fill = guide_colorbar(
+      title.position = "top", 
+      barwidth = 10, 
+      barheight = 0.5, 
+      frame.colour = "black", 
+      ticks.colour = "black")) +
+  theme(
+    legend.title = element_text(size = 15, color = c("black")),
+    legend.text = element_text(face = "bold"),
+    legend.position = "top",
+    legend.box = "horizontal",
+    legend.box.background = element_rect(color = "black", fill = "transparent"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(angle = 30, size = 10, face = "bold.italic", hjust = 1),
+    axis.text.y = element_blank(),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+# K_min (= Minimum number of PCR replicates)
+# We build the data frame to record median and HDI of K_min for each species
+K_min_tab <- data.frame(Species = species_names, # names of species
+                        Median = resources@K_min$median[, 1, 1, 1, 1], # median K_min values (no variation among samples, replicates, and campaigns)
+                        Bottom = resources@K_min$hdi1[, 1, 1, 1, 1], # bottom HDI values
+                        Top = resources@K_min$hdi2[, 1, 1, 1, 1]) # top HDI values
+
+# We plot the figure
+K_min_plot <- ggplot(K_min_tab, aes(y = 1,
+                                    x = Species,
+                                    fill = Median)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = RColorBrewer::brewer.pal(4, "Greens")) +
+  geom_text(aes(label = paste0(Median, "\n[", Bottom, "; ", Top, "]")),
+            fontface = "bold",
+            size = 3,
+            lineheight = 0.75) +
+  theme_classic() +
+  labs(fill = expression("Minimum number of PCR replicates (" * K[min] * ")")) +
+  guides(
+    fill = guide_colorbar(
+      title.position = "top", 
+      barwidth = 10, 
+      barheight = 0.5, 
+      frame.colour = "black", 
+      ticks.colour = "black")) +
+  theme(
+    legend.title = element_text(size = 15, color = c("black")),
+    legend.text = element_text(face = "bold"),
+    legend.position = "top",
+    legend.box = "horizontal",
+    legend.box.background = element_rect(color = "black", fill = "transparent"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(angle = 30, size = 10, face = "bold.italic", hjust = 1),
+    axis.text.y = element_blank(),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+#  M_min (= Minimum sequencing depth)
+# We build the data frame to record median and HDI of M_min for each species
+M_min_tab <- data.frame(Species = species_names, # names of species
+                        Median = ceiling(apply(resources@M_min$median, c(1), median, na.rm = T) + 1), # median M_min values across all samples and replicates
+                        Bottom = ceiling(apply(resources@M_min$hdi1, c(1), hdi, na.rm = T)[1,] + 1), # bottom HDI values
+                        Top = ceiling(apply(resources@M_min$hdi2, c(1), hdi, na.rm = T)[2,] + 1)) # top HDI values
+
+# We plot the figure
+M_min_plot <- ggplot(M_min_tab, aes(y = 1,
+                                    x = Species,
+                                    fill = Median)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = RColorBrewer::brewer.pal(4, "Reds")) +
+  geom_text(aes(label = paste0(Median, "\n[", Bottom, "; ", Top, "]")),
+            fontface = "bold",
+            size = 3,
+            lineheight = 0.75) +
+  theme_classic() +
+  labs(fill = expression("Minimum sequencing depth (" * M[min] * ")")) +
+  guides(
+    fill = guide_colorbar(
+      title.position = "top", 
+      barwidth = 10, 
+      barheight = 0.5, 
+      frame.colour = "black", 
+      ticks.colour = "black")) +
+  theme(
+    legend.title = element_text(size = 15, color = c("black")),
+    legend.text = element_text(face = "bold"),
+    legend.position = "top",
+    legend.box = "horizontal",
+    legend.box.background = element_rect(color = "black", fill = "transparent"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(angle = 30, size = 10, face = "bold.italic", hjust = 1),
+    axis.text.y = element_blank(),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank())
+
+gridExtra::grid.arrange(J_min_plot, K_min_plot, M_min_plot, nrow = 3, ncol = 1)
+```
+
+These estimates guide **resource allocation**, allowing for the **optimization of biodiversity study designs** by identifying the minimal effort needed to achieve reliable conclusions about species detection. By focusing on these minimal sampling efforts, you can efficiently plan fieldwork, ultimately optimizing the technical aspects of the study.
+
+***NOTE:*** Results may not reflect true ecological patterns here, as this is an example dataset with insufficient MCMC samples to fully capture the model's uncertainty.

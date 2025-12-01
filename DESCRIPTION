@@ -1,0 +1,26 @@
+Package: NeMO
+Title: Nested eDNA Metabarcoding Occupancy
+Version: 1.0.0
+Authors@R: c(
+    person("Bastien", "Macé", email = "bastien.mace.49@gmail.com", role = c("aut", "cre", "cph"), comment = c(ORCID = "0000-0001-7721-3993")),
+    person("Stéphanie", "Manel", role = c("ctb"), comment = c(ORCID = "0000-0001-8902-6052")),
+    person("Alice", "Valentini", role = c("ctb"), comment = c(ORCID = "0000-0001-5829-5479")),
+    person("Mathieu", "Rocle", role = c("ctb")),
+    person("Nicolas", "Roset", role = c("ctb")),
+    person("Erwan", "Delrieu-Trottin", role = c("ctb"), comment = c(ORCID = "0000-0002-4120-9316"))
+    )
+Description: A Bayesian framework for modelling multispecies site occupancy from eDNA metabarcoding data.
+License: GPL-3
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+RdMacros: Rdpack
+VignetteBuilder: knitr
+LazyData: true
+Depends: R (>= 3.5.0), HDInterval, R2jags, stats
+Imports: abind, magrittr, methods,  Rdpack, utils
+Suggests: ggridges, gridExtra, knitr, RColorBrewer, rmarkdown, testthat (>= 3.0.0), tidyverse
+Collate: 'classes.R' 'Nemodel.R' 'WAIC.R' 'covarray.R' 'data.R' 'min_resources.R'
+Config/testthat/edition: 3
+URL: https://github.com/bastien-mace/NeMO
+BugReports: https://github.com/bastien-mace/NeMO/issues
