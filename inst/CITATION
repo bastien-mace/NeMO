@@ -1,0 +1,17 @@
+citHeader("To cite this package in publications, please use:")
+
+bibentry(
+  bibtype = "Article",
+  title = "NeMO: a flexible R package for nested multi-species occupancy modelling and eDNA study optimisation",
+  author = c(
+    person("Bastien", "Macé"),
+    person("Stéphanie", "Manel"),
+    person("Alice", "Valentini"),
+    person("Mathieu", "Rocle"),
+    person("Nicolas", "Roset"),
+    person("Erwan", "Delrieu-Trottin")
+  ),
+  year = "2025",
+  journal = "bioRxiv",
+  doi = "10.1101/2025.05.23.655794"
+)
