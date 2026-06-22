@@ -112,9 +112,7 @@ Once the model is run, **NeMO** provides the following outputs:
 
 If you use **NeMO** in your work, please cite the following preprint:
 
-Macé, B., Manel, S., Valentini, A., Rocle, M., Roset, N., & Delrieu-Trottin, E.
-(2025). “NeMO: a flexible R package for nested multi-species occupancy modelling
-and eDNA study optimisation.” _bioRxiv_. <https://doi.org/10.1101/2025.05.23.655794>.
+Macé, B., Manel, S., Valentini, A., Rocle, M., Roset, N., & Delrieu-Trottin, E. (2026). NeMO: A Flexible R Package for Nested Multi-Species Occupancy Modeling and eDNA Study Optimization. _Environmental DNA_, _8_(3), e70326. <https://doi.org/10.1002/edn3.70326>
 
 You can also retrieve the citation from R:
 
