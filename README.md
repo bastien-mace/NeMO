@@ -1,4 +1,4 @@
-[![DOI](https://img.shields.io/badge/DOI-10.1101%2F2025.05.23.655794-blue)](https://doi.org/10.1101/2025.05.23.655794)
+[![DOI](https://img.shields.io/badge/DOI-10.1101%2F2025.05.23.655794-blue)](https://doi.org/10.1111/gcb.70965)
 
 # NeMO: Nested eDNA Metabarcoding Occupancy <img src="inst/figures/logo.png" align="right" height="139"/>
 
